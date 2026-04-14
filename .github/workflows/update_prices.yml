@@ -6,7 +6,10 @@ on:
     # 예: UTC 00:00 = 한국 09:00
     - cron: '*/5 * * * *'
   workflow_dispatch:  # 수동으로도 실행 가능 (GitHub에서 버튼 클릭)
-
+  
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   ← 이 줄 추가
+  
 jobs:
   update-prices:
     runs-on: ubuntu-latest
