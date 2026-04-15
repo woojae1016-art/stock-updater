@@ -2,10 +2,10 @@ name: 주가 자동 업데이트
 
 on:
   schedule:
-    # 매 시간 정각에 실행 (UTC 기준 → 한국시간 +9시간)
-    # 예: UTC 00:00 = 한국 09:00
     - cron: '*/5 * * * *'
-  workflow_dispatch:  # 수동으로도 실행 가능 (GitHub에서 버튼 클릭)
+  workflow_dispatch:
+  repository_dispatch:
+    types: [cron-trigger]
   
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   ← 이 줄 추가
