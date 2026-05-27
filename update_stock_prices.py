@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """
 Woomi 증권 종합 잔고 — 현재가 자동 업데이트
-GitHub Actions에서 매 시간 실행됩니다.
+GitHub Actions에서 5분마다 실행됩니다 (cron-job.org → repository_dispatch).
+
+DB 구조:
+- 종목별 + 계좌별로 행이 분리됨 (예: NVDA-우재, NVDA-혜미, NVDA-하성)
+- 동일 티커의 모든 행은 같은 현재가로 업데이트됨 (메인 루프가 페이지 단위로 순회)
+- 현금 행(*-CASH)은 yfinance 조회 대상 아님 → SKIP 처리
 """
 
 import os
 import time
 import logging
 from datetime import datetime
+
 import requests
 import yfinance as yf
 
@@ -31,31 +37,41 @@ log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
 # 티커 설정
-# symbol   : yfinance 심볼
-# currency : USD / KRW / FX(환율) / GOLD / FIXED
+#   symbol   : yfinance 심볼 (없으면 None)
+#   currency : USD / KRW / FX(환율) / GOLD / FIXED / SKIP
 # ─────────────────────────────────────────────
 TICKERS = {
-    "TSLA":   {"symbol": "TSLA",       "currency": "USD"},
-    "NVDA":   {"symbol": "NVDA",       "currency": "USD"},
-    "UPS":    {"symbol": "UPS",        "currency": "USD"},
-    "TEM":    {"symbol": "TEM",        "currency": "USD"},
-    "GOLD":   {"symbol": "GC=F",       "currency": "GOLD"},   # 금 선물 → 1g 환산
-    "035900": {"symbol": "035900.KQ",  "currency": "KRW"},    # JYP (코스닥)
-    "381170": {"symbol": "381170.KS",  "currency": "KRW"},    # TIGER 미국테크TOP10
-    "457480": {"symbol": "457480.KS",  "currency": "KRW"},    # ACE 테슬라밸류체인
-    "447770": {"symbol": "447770.KS",  "currency": "KRW"},    # TIGER 테슬라채권혼합
-    "0052S0": {"symbol": "0052S0.KS",  "currency": "KRW"},    # 1Q S&P500혼합50
-    "USD":    {"symbol": "USDKRW=X",   "currency": "FX"},     # 달러 환율
-    "KRW":    {"symbol": None,         "currency": "FIXED", "fixed": 1},
-}
-# 현금 항목 — 자동 업데이트 대상 아님 (수동 관리)
+    # 해외주식 (USD)
+    "TSLA":   {"symbol": "TSLA",      "currency": "USD"},
+    "NVDA":   {"symbol": "NVDA",      "currency": "USD"},
+    "UPS":    {"symbol": "UPS",       "currency": "USD"},
+    "TEM":    {"symbol": "TEM",       "currency": "USD"},
+
+    # 금 (1g 환산)
+    "GOLD":   {"symbol": "GC=F",      "currency": "GOLD"},
+
+    # 국내주식 / ETF (KRW)
+    "035900": {"symbol": "035900.KQ", "currency": "KRW"},  # JYP Ent (코스닥)
+    "381170": {"symbol": "381170.KS", "currency": "KRW"},  # TIGER 미국테크TOP10
+    "457480": {"symbol": "457480.KS", "currency": "KRW"},  # ACE 테슬라밸류체인
+    "447770": {"symbol": "447770.KS", "currency": "KRW"},  # TIGER 테슬라채권혼합
+    "0052S0": {"symbol": "0052S0.KS", "currency": "KRW"},  # 1Q S&P500혼합50
+
+    # 환율 / 고정
+    "USD":    {"symbol": "USDKRW=X",  "currency": "FX"},
+    "KRW":    {"symbol": None,        "currency": "FIXED", "fixed": 1},
+
+    # 현금 항목 — 수동 관리, 자동 업데이트 대상 아님
     "KRW-CASH": {"symbol": None, "currency": "SKIP"},
     "USD-CASH": {"symbol": None, "currency": "SKIP"},
     "DC-CASH":  {"symbol": None, "currency": "SKIP"},
+}
+
 # ─────────────────────────────────────────────
 # USD/KRW 환율 (1회 조회 후 재사용)
 # ─────────────────────────────────────────────
 _usd_krw = None
+
 
 def get_usd_krw() -> float:
     global _usd_krw
@@ -71,15 +87,21 @@ def get_usd_krw() -> float:
         _usd_krw = 1479.0
         return _usd_krw
 
+
 # ─────────────────────────────────────────────
 # 가격 조회
 # ─────────────────────────────────────────────
 def fetch_price(ticker: str, info: dict) -> dict:
     currency = info["currency"]
+
+    # 현금 항목 — yfinance 조회 안 함
     if currency == "SKIP":
-        return {"krw": None, "usd": None}    # ← 현금 행은 가격 업데이트 skip
+        return {"krw": None, "usd": None}
+
+    # 고정값 (예: KRW=1)
     if currency == "FIXED":
         return {"krw": info["fixed"], "usd": None}
+
     try:
         price = float(yf.Ticker(info["symbol"]).fast_info.last_price)
     except Exception as e:
@@ -104,15 +126,16 @@ def fetch_price(ticker: str, info: dict) -> dict:
 
     return {"krw": None, "usd": None}
 
+
 # ─────────────────────────────────────────────
-# 노션 DB 전체 행 조회
+# 노션 DB 전체 행 조회 (페이지네이션 지원)
 # ─────────────────────────────────────────────
 def get_pages() -> list:
     pages, payload = [], {}
     while True:
         r = requests.post(
             f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query",
-            headers=HEADERS, json=payload
+            headers=HEADERS, json=payload,
         )
         r.raise_for_status()
         data = r.json()
@@ -121,6 +144,7 @@ def get_pages() -> list:
             break
         payload["start_cursor"] = data["next_cursor"]
     return pages
+
 
 # ─────────────────────────────────────────────
 # 노션 현재가 업데이트
@@ -135,9 +159,10 @@ def update_page(page_id: str, krw, usd):
         return
     r = requests.patch(
         f"https://api.notion.com/v1/pages/{page_id}",
-        headers=HEADERS, json={"properties": props}
+        headers=HEADERS, json={"properties": props},
     )
     r.raise_for_status()
+
 
 # ─────────────────────────────────────────────
 # 메인
@@ -146,13 +171,17 @@ def main():
     log.info(f"===== 업데이트 시작: {datetime.now().strftime('%Y-%m-%d %H:%M')} =====")
 
     pages = get_pages()
-    log.info(f"{len(pages)}개 종목 로드 완료")
+    log.info(f"{len(pages)}개 행 로드 완료")
+
+    # 같은 티커는 가격을 1번만 조회해서 재사용 (yfinance 호출 절감)
+    price_cache: dict = {}
 
     ok = fail = skip = 0
 
     for page in pages:
         title_arr = page["properties"].get("티커", {}).get("title", [])
         ticker = title_arr[0]["plain_text"].strip() if title_arr else ""
+
         if not ticker:
             skip += 1
             continue
@@ -163,7 +192,19 @@ def main():
             skip += 1
             continue
 
-        prices = fetch_price(ticker, info)
+        # SKIP 항목(현금)은 가격 조회/업데이트 모두 스킵 — 조용히 패스
+        if info["currency"] == "SKIP":
+            skip += 1
+            continue
+
+        # 가격 캐시 활용
+        if ticker in price_cache:
+            prices = price_cache[ticker]
+        else:
+            prices = fetch_price(ticker, info)
+            price_cache[ticker] = prices
+            # 첫 조회 후에만 sleep (캐시 적중 시 sleep 불필요)
+            time.sleep(0.3)
 
         if prices["krw"] is None and prices["usd"] is None:
             fail += 1
@@ -172,17 +213,18 @@ def main():
         try:
             update_page(page["id"], prices["krw"], prices["usd"])
             parts = []
-            if prices["krw"]: parts.append(f"₩{prices['krw']:,}")
-            if prices["usd"]: parts.append(f"${prices['usd']}")
+            if prices["krw"]:
+                parts.append(f"₩{prices['krw']:,}")
+            if prices["usd"]:
+                parts.append(f"${prices['usd']}")
             log.info(f"[{ticker}] ✅ {' / '.join(parts)}")
             ok += 1
         except Exception as e:
             log.error(f"[{ticker}] 노션 업데이트 실패: {e}")
             fail += 1
 
-        time.sleep(0.3)
-
     log.info(f"===== 완료 — 성공:{ok} 실패:{fail} 스킵:{skip} =====")
+
 
 if __name__ == "__main__":
     main()
