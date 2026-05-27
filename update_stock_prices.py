@@ -48,7 +48,10 @@ TICKERS = {
     "USD":    {"symbol": "USDKRW=X",   "currency": "FX"},     # 달러 환율
     "KRW":    {"symbol": None,         "currency": "FIXED", "fixed": 1},
 }
-
+# 현금 항목 — 자동 업데이트 대상 아님 (수동 관리)
+    "KRW-CASH": {"symbol": None, "currency": "SKIP"},
+    "USD-CASH": {"symbol": None, "currency": "SKIP"},
+    "DC-CASH":  {"symbol": None, "currency": "SKIP"},
 # ─────────────────────────────────────────────
 # USD/KRW 환율 (1회 조회 후 재사용)
 # ─────────────────────────────────────────────
@@ -73,10 +76,10 @@ def get_usd_krw() -> float:
 # ─────────────────────────────────────────────
 def fetch_price(ticker: str, info: dict) -> dict:
     currency = info["currency"]
-
+    if currency == "SKIP":
+        return {"krw": None, "usd": None}    # ← 현금 행은 가격 업데이트 skip
     if currency == "FIXED":
         return {"krw": info["fixed"], "usd": None}
-
     try:
         price = float(yf.Ticker(info["symbol"]).fast_info.last_price)
     except Exception as e:
