@@ -56,6 +56,9 @@ TICKERS = {
     "457480": {"symbol": "457480.KS", "currency": "KRW"},  # ACE 테슬라밸류체인
     "447770": {"symbol": "447770.KS", "currency": "KRW"},  # TIGER 테슬라채권혼합
     "0052S0": {"symbol": "0052S0.KS", "currency": "KRW"},  # 1Q S&P500혼합50
+"000660": {"symbol": "000660.KS", "currency": "KRW"},  # SK하이닉스
+    "483320": {"symbol": "483320.KS", "currency": "KRW"},  # ACE 엔비디아밸류체인액티브
+    "448540": {"symbol": "448540.KS", "currency": "KRW"},  # ACE 엔비디아채권혼합
 
     # 환율 / 고정
     "USD":    {"symbol": "USDKRW=X",  "currency": "FX"},
