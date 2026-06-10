@@ -6,20 +6,17 @@ on:
   workflow_dispatch:
   repository_dispatch:
     types: [cron-trigger]
-  
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   ← 이 줄 추가
-  
+
 jobs:
   update-prices:
     runs-on: ubuntu-latest
 
     steps:
       - name: 코드 가져오기
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Python 설정
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
