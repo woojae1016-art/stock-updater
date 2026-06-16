@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """
-Woomi 증권 종합 잔고 — 현재가 자동 업데이트 (v3)
+Woomi 증권 종합 잔고 — 현재가 자동 업데이트 (v4)
 GitHub Actions에서 5분마다 실행됩니다 (cron-job.org → repository_dispatch).
 
-v3 변경사항 (v2 대비):
-3. 국내주식 NXT(넥스트레이드) 프리/애프터마켓 가격 반영
-   - 네이버페이 증권 모바일 API에서 시세 조회 (NXT 프리 08:00~08:50 /
-     메인 09:00~15:20 / 애프터 15:30~20:00 가격이 실시간 반영됨)
-   - NXT 운영시간(프리/애프터)에는 NXT 가격, KRX 정규장에는 KRX 가격 사용
-   - 네이버 API 실패 시 기존 yfinance(.KS/.KQ 폴백)로 자동 전환
-   - 네이버 응답에서 NXT 가격 필드를 자동 탐색하므로 필드명이 바뀌어도 대응
-   - 보너스: 네이버는 6자리 코드만으로 조회되므로 .KS/.KQ 구분이 불필요
+v4 변경사항 (v3 대비) — 프리/애프터 NXT 가격이 실제로 들어오도록 수정:
+- 원인: 네이버 응답에는 'nxt'라는 이름의 가격 필드가 존재하지 않음.
+  기존 _find_nxt_price()는 'nxt' 포함 필드를 찾으므로 영원히 실패 → 항상 KRX 종가 폴백.
+- 발견: 연장거래(프리/애프터) 실시간 가격은 `overMarketPriceInfo.overPrice`에 들어있음.
+  (애프터 시간대에 초 단위로 변동 → 연속체결 NXT 애프터마켓 가격으로 확인됨)
+- 수정:
+    · 프리(08:00~08:50)/애프터(15:30~20:00) → overMarketPriceInfo.overPrice 사용
+      (없거나 0이면 closePrice로 안전 폴백)
+    · 정규장(09:00~15:30) → closePrice (장중엔 이 필드가 실시간 현재가).
+      정규장엔 SOR로 KRX·NXT 가격이 거의 동일하고, 네이버가 NXT 단독 현재가를
+      별도로 주지 않으므로 closePrice가 사실상 현재가.
+- overMarketPriceInfo는 /basic 응답에 있고 /integration에는 없으므로 /basic을 우선 조회.
 
-v2 기능 유지:
+v2~v3 기능 유지:
 1. 티커 하드코딩 없음 — 노션 '티커' 값으로 자동 판별
 2. 미국주식 프리/애프터마켓 가격 반영
+3. 네이버 API 실패 시 yfinance(.KS/.KQ 폴백)로 자동 전환
 """
 
 import re
@@ -153,8 +158,10 @@ def fetch_us_price(symbol: str):
 
 # ─────────────────────────────────────────────
 # 국내주식 — NXT 운영시간 판별 (KST 기준)
-#   프리: 08:00~08:50 / 메인: 09:00~15:20(KRX와 중복) / 애프터: 15:30~20:00
-#   반환: "NXT프리" / "정규" / "NXT애프터" / None(장외)
+#   프리 : 08:00~08:50  → "NXT프리"   (overMarketPriceInfo.overPrice 사용)
+#   정규 : 09:00~15:30  → "정규"      (closePrice = 장중 실시간 현재가)
+#   애프터: 15:30~20:00  → "NXT애프터" (overMarketPriceInfo.overPrice 사용)
+#   장외 : 그 외        → None
 # ─────────────────────────────────────────────
 def krx_nxt_session():
     now = datetime.now(KST)
@@ -164,7 +171,7 @@ def krx_nxt_session():
     if 800 <= hm < 850:
         return "NXT프리"
     if 900 <= hm < 1530:
-        return "정규"             # KRX 정규장 우선
+        return "정규"
     if 1530 <= hm < 2000:
         return "NXT애프터"
     return None
@@ -196,46 +203,48 @@ def _walk_json(obj, path=""):
         yield path, obj
 
 
-def _find_nxt_price(data: dict, krx_price: float):
-    """
-    네이버 응답 JSON에서 NXT 현재가 필드를 자동 탐색.
-    경로에 'nxt'가 포함되고 키에 'price'가 포함된 숫자 값 중,
-    KRX 가격 대비 ±30% 이내인 값을 NXT 현재가로 채택.
-    """
-    candidates = []
+def _extract_close_price(data: dict):
+    """KRX 정규장 종가/현재가(closePrice) 추출. 최상위 우선, 없으면 중첩 탐색."""
+    if isinstance(data, dict):
+        for key in ("closePrice", "tradePrice", "currentPrice", "now"):
+            if key in data:
+                n = _to_number(data[key])
+                if n:
+                    return n
+    # 중첩 구조 폴백 (overMarket/nxt 경로는 제외)
     for path, val in _walk_json(data):
         p = path.lower()
-        if "nxt" not in p:
+        if "overmarket" in p or "nxt" in p:
             continue
-        leaf = p.split(".")[-1]
-        if "price" not in leaf:
-            continue
-        # 고가/저가/시가/대비/누적류 제외
-        if any(x in leaf for x in ("high", "low", "open", "compare", "accumulat", "fluctuat")):
-            continue
-        num = _to_number(val)
-        if num and num > 0:
-            # closePrice/tradePrice/currentPrice 우선
-            score = 2 if any(x in leaf for x in ("close", "trade", "current")) else 1
-            candidates.append((score, path, num))
+        if p.split(".")[-1] in ("closeprice", "tradeprice", "currentprice"):
+            n = _to_number(val)
+            if n:
+                return n
+    return None
 
-    if not candidates:
-        return None
 
-    candidates.sort(key=lambda c: -c[0])
-    for score, path, num in candidates:
-        if krx_price and abs(num - krx_price) / krx_price <= 0.30:
-            if DEBUG_NAVER:
-                log.info(f"  NXT 필드 채택: {path} = {num}")
-            return num
+def _extract_over_price(data: dict):
+    """
+    연장거래(프리/애프터) 실시간 현재가 추출.
+    네이버 응답의 overMarketPriceInfo.overPrice (= NXT 프리/애프터마켓 가격).
+    /basic 응답엔 최상위 overMarketPriceInfo, polling 응답엔 datas[].overMarketPriceInfo.
+    """
+    for path, val in _walk_json(data):
+        if path.lower().endswith("overmarketpriceinfo.overprice"):
+            n = _to_number(val)
+            if n and n > 0:
+                return n
     return None
 
 
 # ─────────────────────────────────────────────
-# 국내주식 — 네이버페이 증권 API (NXT 반영)
+# 국내주식 — 네이버페이 증권 API
+#   정규장: closePrice / 프리·애프터: overMarketPriceInfo.overPrice
 #   반환: (가격 or None, 시장상태 라벨)
 # ─────────────────────────────────────────────
 def fetch_kr_price_naver(code: str):
+    # /basic 우선 (closePrice + overMarketPriceInfo 모두 포함).
+    # /integration엔 overMarketPriceInfo가 없으므로 closePrice 폴백 용도로만.
     for endpoint in ("basic", "integration"):
         url = f"https://m.stock.naver.com/api/stock/{code}/{endpoint}"
         try:
@@ -251,35 +260,21 @@ def fetch_kr_price_naver(code: str):
             keys = sorted({p for p, _ in _walk_json(data)})
             log.info(f"[{code}] 네이버 {endpoint} 응답 필드: {keys[:80]}")
 
-        # KRX 현재가 (기본)
-        krx_price = None
-        for key in ("closePrice", "tradePrice", "currentPrice", "now"):
-            if key in data:
-                krx_price = _to_number(data[key])
-                if krx_price:
-                    break
-        if krx_price is None:
-            # 중첩 구조에서 nxt가 아닌 closePrice 탐색
-            for path, val in _walk_json(data):
-                p = path.lower()
-                if "nxt" in p:
-                    continue
-                if p.split(".")[-1] in ("closeprice", "tradeprice", "currentprice"):
-                    krx_price = _to_number(val)
-                    if krx_price:
-                        break
-        if krx_price is None:
+        close_price = _extract_close_price(data)
+        if close_price is None:
             continue
 
-        # NXT 운영시간이면 NXT 가격 우선 적용
+        over_price = _extract_over_price(data)
         session = krx_nxt_session()
-        if session in ("NXT프리", "NXT애프터"):
-            nxt_price = _find_nxt_price(data, krx_price)
-            if nxt_price:
-                return nxt_price, session
-            return krx_price, "정규(NXT미발견)"
 
-        return krx_price, session or "장마감"
+        # 프리/애프터: 연장거래(NXT) 실시간가 우선, 없으면 종가로 폴백
+        if session in ("NXT프리", "NXT애프터"):
+            if over_price:
+                return over_price, session
+            return close_price, f"{session}(연장가없음→종가)"
+
+        # 정규장/그 외: closePrice (장중엔 실시간 현재가)
+        return close_price, session or "장마감"
 
     return None, ""
 
@@ -326,13 +321,13 @@ def fetch_price(ticker: str, symbol, currency: str) -> dict:
         return {"krw": round(get_usd_krw(), 2), "usd": None, "state": ""}
 
     if currency == "KRW":
-        # '심볼' 컬럼에 .KS/.KQ를 직접 지정한 경우 → yfinance 직행
+        # '심볼' 컬럼에 .KS/.KQ를 직접 지정한 경우 → 코드만 추출
         if symbol.endswith((".KS", ".KQ")):
             code = symbol[:-3]
         else:
             code = symbol
 
-        # 1차: 네이버 (NXT 프리/애프터 반영)
+        # 1차: 네이버 (정규장 closePrice / 프리·애프터 overPrice)
         price, state = fetch_kr_price_naver(code)
         if price:
             return {"krw": round(price), "usd": None, "state": state}
