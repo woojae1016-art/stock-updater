@@ -7,6 +7,9 @@ on:
   repository_dispatch:
     types: [cron-trigger]
 
+permissions:
+  contents: write   # keepalive 커밋용
+
 jobs:
   update-prices:
     runs-on: ubuntu-latest
@@ -28,3 +31,18 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
         run: python update_stock_prices.py
+
+      # GitHub는 public 리포에 60일간 커밋이 없으면 schedule 워크플로를 자동 비활성화함.
+      # 마지막 커밋이 30일 이상 지났으면 빈 커밋을 하나 넣어 "활동"을 유지한다.
+      - name: Keepalive (60일 자동 비활성화 방지)
+        run: |
+          LAST=$(git log -1 --format=%ct)
+          NOW=$(date +%s)
+          DAYS=$(( (NOW - LAST) / 86400 ))
+          echo "마지막 커밋 이후 ${DAYS}일 경과"
+          if [ "$DAYS" -ge 30 ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "chore: keepalive (schedule 비활성화 방지)"
+            git push
+          fi
